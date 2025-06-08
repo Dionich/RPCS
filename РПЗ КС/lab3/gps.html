@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPS: Візуалізація положення</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #gps-plot { width: 600px; height: 600px; }
+        #controls { margin-top: 20px; }
+        label { margin-right: 10px; }
+        input { margin-right: 20px; }
+        button { padding: 5px 10px; }
+    </style>
+</head>
+<body>
+    <h1>Візуалізація вимірювань GPS</h1>
+    <div id="gps-plot"></div>
+    <div id="controls">
+        <h3>Налаштування параметрів</h3>
+        <label>Розмір зони (км):</label>
+        <input type="number" id="emulationZoneSize" value="200">
+        <label>Частота повідомлень (1/с):</label>
+        <input type="number" id="messageFrequency" value="1">
+        <label>Швидкість супутників (км/год):</label>
+        <input type="number" id="satelliteSpeed" value="100">
+        <label>Швидкість об'єкта (км/год):</label>
+        <input type="number" id="objectSpeed" value="10">
+        <button onclick="updateConfig()">Оновити</button>
+    </div>
+
+    <script>
+        const socket = new WebSocket('ws://localhost:4001');
+        const c = 300000; // Швидкість світла, км/с
+        let satellites = new Map(); // Зберігання даних супутників
+        let objectPosition = { x: 0, y: 0 }; // Положення об'єкта
+        let isPlotInitialized = false;
+
+        socket.onopen = () => {
+            console.log('Підключено до WebSocket сервера');
+            initializePlot();
+        };
+
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Отримані дані:', data);
+                processGpsData(data);
+            } catch (error) {
+                console.error('Помилка парсингу JSON:', error);
+            }
+        };
+
+        socket.onclose = () => {
+            console.log('З\'єднання закрито');
+        };
+
+        socket.onerror = (error) => {
+            console.error('Помилка WebSocket:', error);
+        };
+
+        function initializePlot() {
+            const layout = {
+                xaxis: { title: 'X (км)', range: [-100, 100] },
+                yaxis: { title: 'Y (км)', range: [-100, 100] },
+                showlegend: true
+            };
+            Plotly.newPlot('gps-plot', [], layout);
+            isPlotInitialized = true;
+        }
+
+        function processGpsData(data) {
+            const id = data.id;
+            const x = data.x;
+            const y = data.y;
+            const timeDiff = (data.receivedAt - data.sentAt) / 1000; // Час у секундах
+            const distance = c * timeDiff; // Відстань, км
+
+            satellites.set(id, { x, y, distance });
+
+            // Якщо є дані від щонайменше 3 супутників, обчислюємо координати об'єкта
+            if (satellites.size >= 3) {
+                calculateObjectPosition();
+            }
+
+            updatePlot();
+        }
+
+        function calculateObjectPosition() {
+            const satArray = Array.from(satellites.values());
+            if (satArray.length < 3) return;
+
+            // Вибираємо перші три супутники
+            const [sat1, sat2, sat3] = satArray;
+
+            // Обчислення параметрів A, B, C для перших двох супутників
+            const A = 2 * (sat2.x - sat1.x);
+            const B = 2 * (sat2.y - sat1.y);
+            const C = sat2.distance ** 2 - sat1.distance ** 2 - sat2.x ** 2 + sat1.x ** 2 - sat2.y ** 2 + sat1.y ** 2;
+
+            // Обчислення параметрів D, E, F для другого і третього супутників
+            const D = 2 * (sat3.x - sat2.x);
+            const E = 2 * (sat3.y - sat2.y);
+            const F = sat3.distance ** 2 - sat2.distance ** 2 - sat3.x ** 2 + sat2.x ** 2 - sat3.y ** 2 + sat2.y ** 2;
+
+            // Обчислення координат об'єкта
+            const x = (C * E - F * B) / (A * E - B * D);
+            const y = (C * D - A * F) / (B * D - A * E);
+
+            objectPosition = { x, y };
+            console.log('Положення об\'єкта:', objectPosition);
+        }
+
+        function updatePlot() {
+            const satelliteTrace = {
+                x: Array.from(satellites.values()).map(s => s.x),
+                y: Array.from(satellites.values()).map(s => s.y),
+                mode: 'markers',
+                type: 'scatter',
+                name: 'Супутники',
+                marker: { size: 10, color: 'blue' }
+            };
+
+            const objectTrace = {
+                x: [objectPosition.x],
+                y: [objectPosition.y],
+                mode: 'markers',
+                type: 'scatter',
+                name: 'Об\'єкт',
+                marker: { size: 12, color: 'red', symbol: 'cross' }
+            };
+
+            const traces = [satelliteTrace, objectTrace];
+            const layout = {
+                xaxis: { title: 'X (км)', range: [-100, 100] },
+                yaxis: { title: 'Y (км)', range: [-100, 100] },
+                showlegend: true
+            };
+
+            if (!isPlotInitialized) {
+                Plotly.newPlot('gps-plot', traces, layout);
+                isPlotInitialized = true;
+            } else {
+                Plotly.react('gps-plot', traces, layout);
+            }
+        }
+
+        function updateConfig() {
+            const config = {
+                emulationZoneSize: parseInt(document.getElementById('emulationZoneSize').value),
+                messageFrequency: parseInt(document.getElementById('messageFrequency').value),
+                satelliteSpeed: parseInt(document.getElementById('satelliteSpeed').value),
+                objectSpeed: parseInt(document.getElementById('objectSpeed').value)
+            };
+
+            fetch('http://localhost:4001/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+            .then(response => response.json())
+            .then(data => console.log('Параметри оновлено:', data))
+            .catch(error => console.error('Помилка API:', error));
+        }
+    </script>
+</body>
+</html>

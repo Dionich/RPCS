@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="uk">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LORAN: Візуалізація положення</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        #loran-plot {
+            width: 600px;
+            height: 600px;
+        }
+
+        #controls {
+            margin-top: 20px;
+        }
+
+        label {
+            margin-right: 10px;
+        }
+
+        input {
+            margin-right: 20px;
+        }
+
+        button {
+            padding: 5px 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Візуалізація вимірювань LORAN</h1>
+    <div id="loran-plot"></div>
+    <div id="controls">
+        <h3>Налаштування параметрів</h3>
+        <label>Розмір зони (км):</label>
+        <input type="number" id="emulationZoneSize" value="200">
+        <label>Частота повідомлень (1/с):</label>
+        <input type="number" id="messageFrequency" value="1">
+        <button onclick="updateConfig()">Оновити</button>
+    </div>
+
+    <script>
+        const socket = new WebSocket('ws://localhost:4002');
+        const c = 300000; // Швидкість світла, км/с
+        let stations = new Map(); // Зберігання даних станцій
+        let objectPosition = { x: 0, y: 0 }; // Положення об'єкта
+        let isPlotInitialized = false;
+
+        socket.onopen = () => {
+            console.log('Підключено до WebSocket сервера');
+            initializePlot();
+        };
+
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Отримані дані:', data);
+                processLoranData(data);
+            } catch (error) {
+                console.error('Помилка парсингу JSON:', error);
+            }
+        };
+
+        socket.onclose = () => {
+            console.log('З\'єднання закрито');
+        };
+
+        socket.onerror = (error) => {
+            console.error('Помилка WebSocket:', error);
+        };
+
+        function initializePlot() {
+            const layout = {
+                xaxis: { title: 'X (км)', range: [-100, 100] },
+                yaxis: { title: 'Y (км)', range: [-100, 100] },
+                showlegend: true
+            };
+            Plotly.newPlot('loran-plot', [], layout);
+            isPlotInitialized = true;
+        }
+
+        function processLoranData(data) {
+            console.log('Отримані дані:', data);
+            const id = data.id;
+            const x = data.x;
+            const y = data.y;
+            const timeDiff = (data.receivedAt - data.sentAt) / 1000;
+            const distance = c * timeDiff;
+            console.log('Станція:', { id, x, y, timeDiff, distance });
+            stations.set(id, { x, y, distance });
+            console.log('Кількість станцій:', stations.size);
+            if (stations.size >= 3) {
+                calculateObjectPosition();
+            }
+            updatePlot();
+        }
+
+        function calculateObjectPosition() {
+            const stationArray = Array.from(stations.values());
+            if (stationArray.length < 3) {
+                console.warn('Недостатньо станцій для трилатерації:', stationArray.length);
+                return;
+            }
+            const [st1, st2, st3] = stationArray;
+            const A = 2 * (st2.x - st1.x);
+            const B = 2 * (st2.y - st1.y);
+            const C = st2.distance ** 2 - st1.distance ** 2 - st2.x ** 2 + st1.x ** 2 - st2.y ** 2 + st1.y ** 2;
+            const D = 2 * (st3.x - st2.x);
+            const E = 2 * (st3.y - st2.y);
+            const F = st3.distance ** 2 - st2.distance ** 2 - st3.x ** 2 + st2.x ** 2 - st3.y ** 2 + st2.y ** 2;
+            const denominator = A * E - B * D;
+            if (Math.abs(denominator) < 1e-10) {
+                console.warn('Неможливо обчислити координати: кола не перетинаються');
+                return;
+            }
+            const x = (C * E - F * B) / denominator;
+            const y = (C * D - A * F) / denominator;
+            if (isNaN(x) || isNaN(y) || !isFinite(x) || !isFinite(y)) {
+                console.warn('Некоректні координати об\'єкта:', { x, y });
+                return;
+            }
+            objectPosition = { x, y };
+            console.log('Положення об\'єкта:', objectPosition);
+        }
+
+        function updatePlot() {
+            const stationTrace = {
+                x: Array.from(stations.values()).map(s => s.x),
+                y: Array.from(stations.values()).map(s => s.y),
+                mode: 'markers',
+                type: 'scatter',
+                name: 'Станції',
+                marker: { size: 10, color: 'blue' }
+            };
+
+            const objectTrace = {
+                x: [objectPosition.x],
+                y: [objectPosition.y],
+                mode: 'markers',
+                type: 'scatter',
+                name: 'Об\'єкт',
+                marker: { size: 12, color: 'red', symbol: 'cross' }
+            };
+
+            const traces = [stationTrace, objectTrace];
+            const layout = {
+                xaxis: { title: 'X (км)', range: [-100, 100] },
+                yaxis: { title: 'Y (км)', range: [-100, 100] },
+                showlegend: true
+            };
+
+            if (!isPlotInitialized) {
+                Plotly.newPlot('loran-plot', traces, layout);
+                isPlotInitialized = true;
+            } else {
+                Plotly.react('loran-plot', traces, layout); // Плавне оновлення
+            }
+        }
+
+        function updateConfig() {
+            const config = {
+                emulationZoneSize: parseInt(document.getElementById('emulationZoneSize').value),
+                messageFrequency: parseInt(document.getElementById('messageFrequency').value)
+            };
+
+            fetch('http://localhost:4002/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+                .then(response => response.json())
+                .then(data => console.log('Параметри оновлено:', data))
+                .catch(error => console.error('Помилка API:', error));
+        }
+        function testPlot() {
+            const testStationTrace = {
+                x: [50, 100, -50],
+                y: [50, -50, 0],
+                mode: 'markers',
+                type: 'scatter',
+                name: 'Тестові станції',
+                marker: { size: 10, color: 'blue' }
+            };
+            const testObjectTrace = {
+                x: [0],
+                y: [0],
+                mode: 'markers',
+                type: 'scatter',
+                name: 'Тестовий об\'єкт',
+                marker: { size: 12, color: 'red', symbol: 'cross' }
+            };
+            Plotly.react('loran-plot', [testStationTrace, testObjectTrace], {
+                xaxis: { title: 'X (км)', range: [-100, 100] },
+                yaxis: { title: 'Y (км)', range: [-100, 100] },
+                showlegend: true
+            });
+        }
+        setTimeout(testPlot, 1000); // Виклик через 1 секунду після завантаження
+    </script>
+</body>
+
+</html>
